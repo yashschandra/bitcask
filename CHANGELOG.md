@@ -4,6 +4,7 @@
 
 ### Bug Fixes
 
+* Fix builds configuration for goreleaser
 * Fix (again) goreleaser config
 * Fix goreleaser config and improve release notes / changelog
 * Fix recoverDatafile error covering ([#162](https://github.com/prologic/bitcask/issues/162))
@@ -17,6 +18,7 @@
 
 ### Updates
 
+* Update CHANGELOG for v0.3.6
 * Update CHANGELOG for v0.3.6
 * Update deps ([#140](https://github.com/prologic/bitcask/issues/140))
 * Update README.md
