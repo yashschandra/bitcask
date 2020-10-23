@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"io/ioutil"
 	"os"
 	"path"
@@ -14,9 +16,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
-
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"time"
 
 	"github.com/prologic/bitcask/internal"
 	"github.com/prologic/bitcask/internal/config"
@@ -77,7 +77,7 @@ func TestAll(t *testing.T) {
 	})
 
 	t.Run("Put", func(t *testing.T) {
-		err = db.Put([]byte([]byte("foo")), []byte("bar"))
+		err = db.Put([]byte("foo"), []byte("bar"), nil)
 		assert.NoError(err)
 	})
 
@@ -85,6 +85,18 @@ func TestAll(t *testing.T) {
 		val, err := db.Get([]byte("foo"))
 		assert.NoError(err)
 		assert.Equal([]byte("bar"), val)
+	})
+
+	t.Run("PutWithTTL", func(t *testing.T) {
+		tm := time.Now().UTC().Add(-1 * time.Second)
+		err = db.Put([]byte("bar"), []byte("baz"), &tm)
+		assert.NoError(err)
+	})
+
+	t.Run("GetExpiredKey", func(t *testing.T) {
+		_, err := db.Get([]byte("bar"))
+		assert.Error(err)
+		assert.Equal(ErrKeyExpired, err)
 	})
 
 	t.Run("Len", func(t *testing.T) {
@@ -146,9 +158,9 @@ func TestDeleteAll(t *testing.T) {
 	assert := assert.New(t)
 	testdir, _ := ioutil.TempDir("", "bitcask")
 	db, _ := Open(testdir)
-	_ = db.Put([]byte("foo"), []byte("foo"))
-	_ = db.Put([]byte("bar"), []byte("bar"))
-	_ = db.Put([]byte("baz"), []byte("baz"))
+	_ = db.Put([]byte("foo"), []byte("foo"), nil)
+	_ = db.Put([]byte("bar"), []byte("bar"), nil)
+	_ = db.Put([]byte("baz"), []byte("baz"), nil)
 	assert.Equal(3, db.Len())
 	err := db.DeleteAll()
 	assert.NoError(err)
@@ -166,12 +178,12 @@ func TestReopen1(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		testdir, _ := ioutil.TempDir("", "bitcask")
 		db, _ := Open(testdir, WithMaxDatafileSize(1))
-		_ = db.Put([]byte("foo"), []byte("bar"))
-		_ = db.Put([]byte("foo"), []byte("bar1"))
-		_ = db.Put([]byte("foo"), []byte("bar2"))
-		_ = db.Put([]byte("foo"), []byte("bar3"))
-		_ = db.Put([]byte("foo"), []byte("bar4"))
-		_ = db.Put([]byte("foo"), []byte("bar5"))
+		_ = db.Put([]byte("foo"), []byte("bar"), nil)
+		_ = db.Put([]byte("foo"), []byte("bar1"), nil)
+		_ = db.Put([]byte("foo"), []byte("bar2"), nil)
+		_ = db.Put([]byte("foo"), []byte("bar3"), nil)
+		_ = db.Put([]byte("foo"), []byte("bar4"), nil)
+		_ = db.Put([]byte("foo"), []byte("bar5"), nil)
 		_ = db.Reopen()
 		val, _ := db.Get([]byte("foo"))
 		assert.Equal("bar5", string(val))
@@ -196,7 +208,7 @@ func TestReopen(t *testing.T) {
 		})
 
 		t.Run("Put", func(t *testing.T) {
-			err = db.Put([]byte("foo"), []byte("bar"))
+			err = db.Put([]byte("foo"), []byte("bar"), nil)
 			assert.NoError(err)
 		})
 
@@ -218,7 +230,7 @@ func TestReopen(t *testing.T) {
 		})
 
 		t.Run("PutAfterReopen", func(t *testing.T) {
-			err = db.Put([]byte("zzz"), []byte("foo"))
+			err = db.Put([]byte("zzz"), []byte("foo"), nil)
 			assert.NoError(err)
 		})
 
@@ -253,7 +265,7 @@ func TestDeletedKeys(t *testing.T) {
 		})
 
 		t.Run("Put", func(t *testing.T) {
-			err = db.Put([]byte("foo"), []byte("bar"))
+			err = db.Put([]byte("foo"), []byte("bar"), nil)
 			assert.NoError(err)
 		})
 
@@ -357,7 +369,7 @@ func TestAutoRecovery(t *testing.T) {
 			n := 10
 			for i := 0; i < n; i++ {
 				key, val := makeKeyVal(i)
-				err = db.Put(key, val)
+				err = db.Put(key, val, nil)
 				require.NoError(err)
 			}
 			for i := 0; i < n; i++ {
@@ -433,7 +445,7 @@ func TestReIndex(t *testing.T) {
 		})
 
 		t.Run("Put", func(t *testing.T) {
-			err = db.Put([]byte("foo"), []byte("bar"))
+			err = db.Put([]byte("foo"), []byte("bar"), nil)
 			assert.NoError(err)
 		})
 
@@ -501,7 +513,7 @@ func TestReIndexDeletedKeys(t *testing.T) {
 		})
 
 		t.Run("Put", func(t *testing.T) {
-			err = db.Put([]byte("foo"), []byte("bar"))
+			err = db.Put([]byte("foo"), []byte("bar"), nil)
 			assert.NoError(err)
 		})
 
@@ -575,7 +587,7 @@ func TestSync(t *testing.T) {
 	t.Run("Put", func(t *testing.T) {
 		key := []byte(strings.Repeat(" ", 17))
 		value := []byte("foobar")
-		err = db.Put(key, value)
+		err = db.Put(key, value, nil)
 	})
 }
 
@@ -595,7 +607,7 @@ func TestMaxKeySize(t *testing.T) {
 	t.Run("Put", func(t *testing.T) {
 		key := []byte(strings.Repeat(" ", 17))
 		value := []byte("foobar")
-		err = db.Put(key, value)
+		err = db.Put(key, value, nil)
 		assert.Error(err)
 		assert.Equal(ErrKeyTooLarge, err)
 	})
@@ -617,7 +629,7 @@ func TestMaxValueSize(t *testing.T) {
 	t.Run("Put", func(t *testing.T) {
 		key := []byte("foo")
 		value := []byte(strings.Repeat(" ", 17))
-		err = db.Put(key, value)
+		err = db.Put(key, value, nil)
 		assert.Error(err)
 		assert.Equal(ErrValueTooLarge, err)
 	})
@@ -641,7 +653,7 @@ func TestStats(t *testing.T) {
 		})
 
 		t.Run("Put", func(t *testing.T) {
-			err := db.Put([]byte("foo"), []byte("bar"))
+			err := db.Put([]byte("foo"), []byte("bar"), nil)
 			assert.NoError(err)
 		})
 
@@ -688,7 +700,7 @@ func TestStatsError(t *testing.T) {
 		})
 
 		t.Run("Put", func(t *testing.T) {
-			err := db.Put([]byte("foo"), []byte("bar"))
+			err := db.Put([]byte("foo"), []byte("bar"), nil)
 			assert.NoError(err)
 		})
 
@@ -742,14 +754,14 @@ func TestMaxDatafileSize(t *testing.T) {
 		})
 
 		t.Run("Put", func(t *testing.T) {
-			err := db.Put([]byte("foo"), []byte("bar"))
+			err := db.Put([]byte("foo"), []byte("bar"), nil)
 			assert.NoError(err)
 		})
 	})
 
 	t.Run("Put", func(t *testing.T) {
 		for i := 0; i < 10; i++ {
-			err := db.Put([]byte(fmt.Sprintf("key_%d", i)), []byte("bar"))
+			err := db.Put([]byte(fmt.Sprintf("key_%d", i)), []byte("bar"), nil)
 			assert.NoError(err)
 		}
 	})
@@ -795,7 +807,7 @@ func TestMerge(t *testing.T) {
 		})
 
 		t.Run("Put", func(t *testing.T) {
-			err := db.Put([]byte("foo"), []byte("bar"))
+			err := db.Put([]byte("foo"), []byte("bar"), nil)
 			assert.NoError(err)
 		})
 
@@ -806,7 +818,7 @@ func TestMerge(t *testing.T) {
 
 		t.Run("Put", func(t *testing.T) {
 			for i := 0; i < 10; i++ {
-				err := db.Put([]byte("foo"), []byte("bar"))
+				err := db.Put([]byte("foo"), []byte("bar"), nil)
 				assert.NoError(err)
 			}
 		})
@@ -852,12 +864,12 @@ func TestGetErrors(t *testing.T) {
 		db, err := Open(testdir, WithMaxDatafileSize(32))
 		assert.NoError(err)
 
-		err = db.Put([]byte("foo"), []byte("bar"))
+		err = db.Put([]byte("foo"), []byte("bar"), nil)
 		assert.NoError(err)
 
 		mockDatafile := new(mocks.Datafile)
 		mockDatafile.On("FileID").Return(0)
-		mockDatafile.On("ReadAt", int64(0), int64(22)).Return(
+		mockDatafile.On("ReadAt", int64(0), int64(30)).Return(
 			internal.Entry{},
 			ErrMockError,
 		)
@@ -873,15 +885,15 @@ func TestGetErrors(t *testing.T) {
 		assert.NoError(err)
 		defer os.RemoveAll(testdir)
 
-		db, err := Open(testdir, WithMaxDatafileSize(32))
+		db, err := Open(testdir, WithMaxDatafileSize(40))
 		assert.NoError(err)
 
-		err = db.Put([]byte("foo"), []byte("bar"))
+		err = db.Put([]byte("foo"), []byte("bar"), nil)
 		assert.NoError(err)
 
 		mockDatafile := new(mocks.Datafile)
 		mockDatafile.On("FileID").Return(0)
-		mockDatafile.On("ReadAt", int64(0), int64(22)).Return(
+		mockDatafile.On("ReadAt", int64(0), int64(30)).Return(
 			internal.Entry{
 				Checksum: 0x0,
 				Key:      []byte("foo"),
@@ -909,7 +921,7 @@ func TestPutBorderCases(t *testing.T) {
 		db, err := Open(testdir)
 		assert.NoError(err)
 
-		err = db.Put([]byte("alice"), nil)
+		err = db.Put([]byte("alice"), nil, nil)
 		assert.NoError(err)
 		z, err := db.Get([]byte("alice"))
 		assert.NoError(err)
@@ -940,7 +952,7 @@ func TestPutErrors(t *testing.T) {
 		).Return(int64(0), int64(0), ErrMockError)
 		db.curr = mockDatafile
 
-		err = db.Put([]byte("foo"), []byte("bar"))
+		err = db.Put([]byte("foo"), []byte("bar"), nil)
 		assert.Error(err)
 		assert.Equal(ErrMockError, err)
 	})
@@ -965,7 +977,7 @@ func TestPutErrors(t *testing.T) {
 		mockDatafile.On("Sync").Return(ErrMockError)
 		db.curr = mockDatafile
 
-		err = db.Put([]byte("bar"), []byte("baz"))
+		err = db.Put([]byte("bar"), []byte("baz"), nil)
 		assert.Error(err)
 		assert.Equal(ErrMockError, err)
 	})
@@ -976,7 +988,7 @@ func TestPutErrors(t *testing.T) {
 
 		db, err := Open(testdir)
 		assert.NoError(err)
-		err = db.Put(nil, []byte("hello"))
+		err = db.Put(nil, []byte("hello"), nil)
 		assert.Equal(ErrEmptyKey, err)
 
 	})
@@ -1020,7 +1032,7 @@ func TestOpenErrors(t *testing.T) {
 		db, err := Open(testdir)
 		assert.NoError(err)
 
-		err = db.Put([]byte("foo"), []byte("bar"))
+		err = db.Put([]byte("foo"), []byte("bar"), nil)
 		assert.NoError(err)
 
 		err = db.Close()
@@ -1094,7 +1106,7 @@ func TestDeleteErrors(t *testing.T) {
 		db, err := Open(testdir, WithMaxDatafileSize(32))
 		assert.NoError(err)
 
-		err = db.Put([]byte("foo"), []byte("bar"))
+		err = db.Put([]byte("foo"), []byte("bar"), nil)
 		assert.NoError(err)
 
 		mockDatafile := new(mocks.Datafile)
@@ -1159,11 +1171,11 @@ func TestMergeErrors(t *testing.T) {
 		db, err := Open(testdir)
 		assert.NoError(err)
 
-		assert.NoError(db.Put([]byte("foo"), []byte("bar")))
+		assert.NoError(db.Put([]byte("foo"), []byte("bar"), nil))
 
 		mockDatafile := new(mocks.Datafile)
 		mockDatafile.On("FileID").Return(0)
-		mockDatafile.On("ReadAt", int64(0), int64(22)).Return(
+		mockDatafile.On("ReadAt", int64(0), int64(30)).Return(
 			internal.Entry{},
 			ErrMockError,
 		)
@@ -1194,7 +1206,7 @@ func TestConcurrent(t *testing.T) {
 		})
 
 		t.Run("Put", func(t *testing.T) {
-			err = db.Put([]byte("foo"), []byte("bar"))
+			err = db.Put([]byte("foo"), []byte("bar"), nil)
 			assert.NoError(err)
 		})
 	})
@@ -1209,7 +1221,7 @@ func TestConcurrent(t *testing.T) {
 					if i%x == 0 {
 						key := []byte(fmt.Sprintf("k%d", i))
 						value := []byte(fmt.Sprintf("v%d", i))
-						err := db.Put(key, value)
+						err := db.Put(key, value, nil)
 						assert.NoError(err)
 					}
 				}
@@ -1278,7 +1290,7 @@ func TestScan(t *testing.T) {
 				"hello": []byte("world"),
 			}
 			for k, v := range items {
-				err = db.Put([]byte(k), v)
+				err = db.Put([]byte(k), v, nil)
 				assert.NoError(err)
 			}
 		})
@@ -1373,7 +1385,7 @@ func BenchmarkGet(b *testing.B) {
 				b.Fatal(err)
 			}
 
-			err = db.Put(key, value)
+			err = db.Put(key, value, nil)
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -1441,7 +1453,7 @@ func BenchmarkPut(b *testing.B) {
 				value := []byte(strings.Repeat(" ", tt.size))
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
-					err := db.Put(key, value)
+					err := db.Put(key, value, nil)
 					if err != nil {
 						b.Fatal(err)
 					}
@@ -1479,7 +1491,7 @@ func BenchmarkScan(b *testing.B) {
 		"hello": []byte("world"),
 	}
 	for k, v := range items {
-		err := db.Put([]byte(k), v)
+		err := db.Put([]byte(k), v, nil)
 		if err != nil {
 			b.Fatal(err)
 		}

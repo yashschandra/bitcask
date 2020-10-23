@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/gofrs/flock"
 	art "github.com/plar/go-adaptive-radix-tree"
@@ -27,6 +28,10 @@ var (
 	// ErrKeyTooLarge is the error returned for a key that exceeds the
 	// maximum allowed key size (configured with WithMaxKeySize).
 	ErrKeyTooLarge = errors.New("error: key too large")
+
+	// ErrKeyExpired is the error returned when a key is queried which has
+	// already expired (due to ttl)
+	ErrKeyExpired = errors.New("error: key expired")
 
 	// ErrEmptyKey is the error returned for a value with an empty key.
 	ErrEmptyKey = errors.New("error: empty key")
@@ -110,37 +115,12 @@ func (b *Bitcask) Sync() error {
 	return b.curr.Sync()
 }
 
-// Get retrieves the value of the given key. If the key is not found or an/I/O
-// error occurs a null byte slice is returned along with the error.
+// Get fetches value for a key
 func (b *Bitcask) Get(key []byte) ([]byte, error) {
-	var df data.Datafile
-
-	b.mu.RLock()
-	value, found := b.trie.Search(key)
-	if !found {
-		b.mu.RUnlock()
-		return nil, ErrKeyNotFound
-	}
-
-	item := value.(internal.Item)
-
-	if item.FileID == b.curr.FileID() {
-		df = b.curr
-	} else {
-		df = b.datafiles[item.FileID]
-	}
-
-	e, err := df.ReadAt(item.Offset, item.Size)
-	b.mu.RUnlock()
+	e, err := b.get(key)
 	if err != nil {
 		return nil, err
 	}
-
-	checksum := crc32.ChecksumIEEE(e.Value)
-	if checksum != e.Checksum {
-		return nil, ErrChecksumFailed
-	}
-
 	return e.Value, nil
 }
 
@@ -153,7 +133,7 @@ func (b *Bitcask) Has(key []byte) bool {
 }
 
 // Put stores the key and value in the database.
-func (b *Bitcask) Put(key, value []byte) error {
+func (b *Bitcask) Put(key, value []byte, expiry *time.Time) error {
 	if len(key) == 0 {
 		return ErrEmptyKey
 	}
@@ -165,7 +145,7 @@ func (b *Bitcask) Put(key, value []byte) error {
 	}
 
 	b.mu.Lock()
-	offset, n, err := b.put(key, value)
+	offset, n, err := b.put(key, value, expiry)
 	if err != nil {
 		b.mu.Unlock()
 		return err
@@ -189,7 +169,7 @@ func (b *Bitcask) Put(key, value []byte) error {
 // occurs the error is returned.
 func (b *Bitcask) Delete(key []byte) error {
 	b.mu.Lock()
-	_, _, err := b.put(key, []byte{})
+	_, _, err := b.put(key, []byte{}, nil)
 	if err != nil {
 		b.mu.Unlock()
 		return err
@@ -206,7 +186,7 @@ func (b *Bitcask) DeleteAll() (err error) {
 	defer b.mu.RUnlock()
 
 	b.trie.ForEach(func(node art.Node) bool {
-		_, _, err = b.put(node.Key(), []byte{})
+		_, _, err = b.put(node.Key(), []byte{}, nil)
 		return err == nil
 	})
 	b.trie = art.New()
@@ -273,8 +253,47 @@ func (b *Bitcask) Fold(f func(key []byte) error) (err error) {
 	return
 }
 
+// get retrieves the value of the given key. If the key is not found or an/I/O
+// error occurs a null byte slice is returned along with the error.
+func (b *Bitcask) get(key []byte) (internal.Entry, error) {
+	var df data.Datafile
+
+	b.mu.RLock()
+	value, found := b.trie.Search(key)
+	if !found {
+		b.mu.RUnlock()
+		return internal.Entry{}, ErrKeyNotFound
+	}
+
+	item := value.(internal.Item)
+
+	if item.FileID == b.curr.FileID() {
+		df = b.curr
+	} else {
+		df = b.datafiles[item.FileID]
+	}
+
+	e, err := df.ReadAt(item.Offset, item.Size)
+	b.mu.RUnlock()
+	if err != nil {
+		return internal.Entry{}, err
+	}
+
+	if e.Expiry != nil && e.Expiry.Before(time.Now().UTC()) {
+		go b.Delete(key)
+		return internal.Entry{}, ErrKeyExpired
+	}
+
+	checksum := crc32.ChecksumIEEE(e.Value)
+	if checksum != e.Checksum {
+		return internal.Entry{}, ErrChecksumFailed
+	}
+
+	return e, nil
+}
+
 // put inserts a new (key, value). Both key and value are valid inputs.
-func (b *Bitcask) put(key, value []byte) (int64, int64, error) {
+func (b *Bitcask) put(key, value []byte, expiry *time.Time) (int64, int64, error) {
 	size := b.curr.Size()
 	if size >= int64(b.config.MaxDatafileSize) {
 		err := b.curr.Close()
@@ -299,7 +318,7 @@ func (b *Bitcask) put(key, value []byte) (int64, int64, error) {
 		b.curr = curr
 	}
 
-	e := internal.NewEntry(key, value)
+	e := internal.NewEntry(key, value, expiry)
 	return b.curr.Write(e)
 }
 
@@ -349,12 +368,12 @@ func (b *Bitcask) Merge() error {
 	// Doing this automatically strips deleted keys and
 	// old key/value pairs
 	err = b.Fold(func(key []byte) error {
-		value, err := b.Get(key)
+		e, err := b.get(key)
 		if err != nil {
 			return err
 		}
 
-		if err := mdb.Put(key, value); err != nil {
+		if err := mdb.Put(key, e.Value, e.Expiry); err != nil {
 			return err
 		}
 
