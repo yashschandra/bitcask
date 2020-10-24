@@ -88,6 +88,10 @@ func TestAll(t *testing.T) {
 		assert.Equal([]byte("bar"), val)
 	})
 
+	t.Run("Len", func(t *testing.T) {
+		assert.Equal(1, db.Len())
+	})
+
 	t.Run("PutWithTTL", func(t *testing.T) {
 		tm := time.Now().UTC().Add(-1 * time.Second)
 		err = db.Put([]byte("bar"), []byte("baz"), &tm)
@@ -98,10 +102,6 @@ func TestAll(t *testing.T) {
 		_, err := db.Get([]byte("bar"))
 		assert.Error(err)
 		assert.Equal(ErrKeyExpired, err)
-	})
-
-	t.Run("Len", func(t *testing.T) {
-		assert.Equal(1, db.Len())
 	})
 
 	t.Run("Has", func(t *testing.T) {
