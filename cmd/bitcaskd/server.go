@@ -40,11 +40,11 @@ func (s *server) handleSet(cmd redcon.Command, conn redcon.Conn) {
 	}
 	key := cmd.Args[1]
 	value := cmd.Args[2]
-	var expiry *time.Time
+	var opts []bitcask.PutOptions
 	if len(cmd.Args) == 4 {
 		ttl, _ := binary.Varint(cmd.Args[3])
 		e := time.Now().UTC().Add(time.Duration(ttl)*time.Millisecond)
-		expiry = &e
+		opts = append(opts, bitcask.WithExpiry(e))
 	}
 
 	err := s.db.Lock()
@@ -54,7 +54,7 @@ func (s *server) handleSet(cmd redcon.Command, conn redcon.Conn) {
 	}
 	defer s.db.Unlock()
 
-	if err := s.db.Put(key, value, expiry); err != nil {
+	if err := s.db.Put(key, value, opts...); err != nil {
 		conn.WriteString(fmt.Sprintf("ERR: %s", err))
 	} else {
 		conn.WriteString("OK")

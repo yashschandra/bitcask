@@ -1,6 +1,9 @@
 package bitcask
 
-import "github.com/prologic/bitcask/internal/config"
+import (
+	"github.com/prologic/bitcask/internal/config"
+	"time"
+)
 
 const (
 	// DefaultMaxDatafileSize is the default maximum datafile size in bytes
@@ -70,5 +73,18 @@ func newDefaultConfig() *config.Config {
 		MaxKeySize:      DefaultMaxKeySize,
 		MaxValueSize:    DefaultMaxValueSize,
 		Sync:            DefaultSync,
+	}
+}
+
+type Feature struct {
+	Expiry *time.Time
+}
+
+type PutOptions func(*Feature) error
+
+func WithExpiry(expiry time.Time) PutOptions {
+	return func(f *Feature) error {
+		f.Expiry = &expiry
+		return nil
 	}
 }

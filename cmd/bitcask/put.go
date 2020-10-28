@@ -55,7 +55,7 @@ func put(path, key string, value io.Reader) int {
 		return 1
 	}
 
-	err = db.Put([]byte(key), data, nil)
+	err = db.Put([]byte(key), data)
 	if err != nil {
 		log.WithError(err).Error("error writing key")
 		return 1
