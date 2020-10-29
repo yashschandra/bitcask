@@ -19,6 +19,7 @@ import (
 	"github.com/prologic/bitcask/internal/config"
 	"github.com/prologic/bitcask/internal/data"
 	"github.com/prologic/bitcask/internal/index"
+	log "github.com/sirupsen/logrus"
 )
 
 var (
@@ -517,6 +518,7 @@ func (b *Bitcask) checkAndUpgrade(configPath string) error {
 	}
 	// for v0 to v1 upgrade, just need to perform merge operation
 	if b.config.DBVersion == uint32(0) && CurrentDBVersion == uint32(1) {
+		log.Warn("upgrading db version, might take couple of minutes....")
 		b.config.DBVersion = CurrentDBVersion
 		if err := b.Merge(); err != nil {
 			return err
