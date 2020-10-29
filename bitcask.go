@@ -47,6 +47,8 @@ var (
 	// ErrDatabaseLocked is the error returned if the database is locked
 	// (typically opened by another process)
 	ErrDatabaseLocked = errors.New("error: database locked")
+
+	ErrInvalidVersion = errors.New("error: invalid db version")
 )
 
 // Bitcask is a struct that represents a on-disk LSM and WAL data structure
@@ -497,7 +499,31 @@ func Open(path string, options ...Option) (*Bitcask, error) {
 		return nil, err
 	}
 
+	if err := bitcask.checkAndUpgrade(configPath); err != nil {
+		return nil, err
+	}
+
 	return bitcask, nil
+}
+
+// checkAndUpgrade checks if DB upgrade is required
+// if yes, then applies version upgrade and saves updated config
+func (b *Bitcask) checkAndUpgrade(configPath string) error {
+	if b.config.DBVersion == CurrentDBVersion {
+		return nil
+	}
+	if b.config.DBVersion > CurrentDBVersion {
+		return ErrInvalidVersion
+	}
+	// for v0 to v1 upgrade, just need to perform merge operation
+	if b.config.DBVersion == uint32(0) && CurrentDBVersion == uint32(1) {
+		b.config.DBVersion = CurrentDBVersion
+		if err := b.Merge(); err != nil {
+			return err
+		}
+		return b.config.Save(configPath)
+	}
+	return nil
 }
 
 func loadDatafiles(path string, maxKeySize uint32, maxValueSize uint64) (datafiles map[int]data.Datafile, lastID int, err error) {

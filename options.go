@@ -1,8 +1,9 @@
 package bitcask
 
 import (
-	"github.com/prologic/bitcask/internal/config"
 	"time"
+
+	"github.com/prologic/bitcask/internal/config"
 )
 
 const (
@@ -19,6 +20,8 @@ const (
 	DefaultSync = false
 
 	// DefaultAutoRecovery is the default auto-recovery action.
+
+	CurrentDBVersion = uint32(1)
 )
 
 // Option is a function that takes a config struct and modifies it
@@ -73,6 +76,7 @@ func newDefaultConfig() *config.Config {
 		MaxKeySize:      DefaultMaxKeySize,
 		MaxValueSize:    DefaultMaxValueSize,
 		Sync:            DefaultSync,
+		DBVersion:       CurrentDBVersion,
 	}
 }
 
