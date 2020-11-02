@@ -19,6 +19,7 @@ import (
 	"github.com/prologic/bitcask/internal/config"
 	"github.com/prologic/bitcask/internal/data"
 	"github.com/prologic/bitcask/internal/index"
+	"github.com/prologic/bitcask/scripts/migrations"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -464,6 +465,10 @@ func Open(path string, options ...Option) (*Bitcask, error) {
 		cfg = newDefaultConfig()
 	}
 
+	if err := checkAndUpgrade(cfg, configPath); err != nil {
+		return nil, err
+	}
+
 	bitcask := &Bitcask{
 		Flock:   flock.New(filepath.Join(path, "lock")),
 		config:  cfg,
@@ -500,30 +505,23 @@ func Open(path string, options ...Option) (*Bitcask, error) {
 		return nil, err
 	}
 
-	if err := bitcask.checkAndUpgrade(configPath); err != nil {
-		return nil, err
-	}
-
 	return bitcask, nil
 }
 
 // checkAndUpgrade checks if DB upgrade is required
 // if yes, then applies version upgrade and saves updated config
-func (b *Bitcask) checkAndUpgrade(configPath string) error {
-	if b.config.DBVersion == CurrentDBVersion {
+func checkAndUpgrade(cfg *config.Config, configPath string) error {
+	if cfg.DBVersion == CurrentDBVersion {
 		return nil
 	}
-	if b.config.DBVersion > CurrentDBVersion {
+	if cfg.DBVersion > CurrentDBVersion {
 		return ErrInvalidVersion
 	}
-	// for v0 to v1 upgrade, just need to perform merge operation
-	if b.config.DBVersion == uint32(0) && CurrentDBVersion == uint32(1) {
-		log.Warn("upgrading db version, might take couple of minutes....")
-		b.config.DBVersion = CurrentDBVersion
-		if err := b.Merge(); err != nil {
-			return err
-		}
-		return b.config.Save(configPath)
+	// for v0 to v1 upgrade, we need to append 8 null bytes after each encoded entry in datafiles
+	if cfg.DBVersion == uint32(0) && CurrentDBVersion == uint32(1) {
+		log.Warn("upgrading db version, might take some time....")
+		cfg.DBVersion = CurrentDBVersion
+		return migrations.ApplyV0ToV1(filepath.Base(configPath), cfg.MaxDatafileSize)
 	}
 	return nil
 }
