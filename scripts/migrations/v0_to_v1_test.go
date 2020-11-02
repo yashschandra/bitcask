@@ -40,6 +40,7 @@ func Test_ApplyV0ToV1(t *testing.T) {
 	_, err = w2.Write(buf[:52])
 	assert.NoError(err)
 	err = ApplyV0ToV1(testdir, 104)
+	assert.NoError(err)
 	r0, err := os.Open(filepath.Join(testdir, "000000000.data"))
 	assert.NoError(err)
 	defer r0.Close()
