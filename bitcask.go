@@ -521,7 +521,7 @@ func checkAndUpgrade(cfg *config.Config, configPath string) error {
 	if cfg.DBVersion == uint32(0) && CurrentDBVersion == uint32(1) {
 		log.Warn("upgrading db version, might take some time....")
 		cfg.DBVersion = CurrentDBVersion
-		return migrations.ApplyV0ToV1(filepath.Base(configPath), cfg.MaxDatafileSize)
+		return migrations.ApplyV0ToV1(filepath.Dir(configPath), cfg.MaxDatafileSize)
 	}
 	return nil
 }
