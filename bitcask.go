@@ -18,6 +18,7 @@ import (
 	"github.com/prologic/bitcask/internal/config"
 	"github.com/prologic/bitcask/internal/data"
 	"github.com/prologic/bitcask/internal/index"
+	"github.com/prologic/bitcask/internal/metadata"
 )
 
 var (
@@ -59,6 +60,7 @@ type Bitcask struct {
 	datafiles map[int]data.Datafile
 	trie      art.Tree
 	indexer   index.Indexer
+	metadata  *metadata.MetaData
 }
 
 // Stats is a struct returned by Stats() on an open Bitcask instance
@@ -92,7 +94,7 @@ func (b *Bitcask) Close() error {
 		os.Remove(b.Flock.Path())
 	}()
 
-	if err := b.indexer.Save(b.trie, filepath.Join(b.path, "index")); err != nil {
+	if err := b.saveIndex(); err != nil {
 		return err
 	}
 
@@ -174,6 +176,13 @@ func (b *Bitcask) Put(key, value []byte) error {
 	if b.config.Sync {
 		if err := b.curr.Sync(); err != nil {
 			b.mu.Unlock()
+			return err
+		}
+	}
+
+	if b.metadata.IndexUpToDate {
+		b.metadata.IndexUpToDate = false
+		if err := b.metadata.Save(filepath.Join(b.path, "meta.json"), b.config.FileFileModeBeforeUmask); err != nil {
 			return err
 		}
 	}
@@ -297,6 +306,10 @@ func (b *Bitcask) put(key, value []byte) (int64, int64, error) {
 			return -1, 0, err
 		}
 		b.curr = curr
+		err = b.saveIndex()
+		if err != nil {
+			return -1, 0, err
+		}
 	}
 
 	e := internal.NewEntry(key, value)
@@ -311,7 +324,7 @@ func (b *Bitcask) Reopen() error {
 	if err != nil {
 		return err
 	}
-	t, err := loadIndex(b.path, b.indexer, b.config.MaxKeySize, datafiles)
+	t, err := loadIndex(b.path, b.indexer, b.config.MaxKeySize, datafiles, lastID, b.metadata.IndexUpToDate)
 	if err != nil {
 		return err
 	}
@@ -413,8 +426,9 @@ func (b *Bitcask) Merge() error {
 // configuration options as functions.
 func Open(path string, options ...Option) (*Bitcask, error) {
 	var (
-		cfg *config.Config
-		err error
+		cfg  *config.Config
+		err  error
+		meta *metadata.MetaData
 	)
 
 	configPath := filepath.Join(path, "config.json")
@@ -437,12 +451,18 @@ func Open(path string, options ...Option) (*Bitcask, error) {
 		return nil, err
 	}
 
+	meta, err = loadMetadata(path)
+	if err != nil {
+		return nil, err
+	}
+
 	bitcask := &Bitcask{
-		Flock:   flock.New(filepath.Join(path, "lock")),
-		config:  cfg,
-		options: options,
-		path:    path,
-		indexer: index.NewIndexer(),
+		Flock:    flock.New(filepath.Join(path, "lock")),
+		config:   cfg,
+		options:  options,
+		path:     path,
+		indexer:  index.NewIndexer(),
+		metadata: meta,
 	}
 
 	locked, err := bitcask.Flock.TryLock()
@@ -468,6 +488,25 @@ func Open(path string, options ...Option) (*Bitcask, error) {
 	}
 
 	return bitcask, nil
+}
+
+// Backup copies db directory to given path
+func (b *Bitcask) Backup(path string) error {
+	return internal.Copy(b.path, path)
+}
+
+// saveIndex saves index currently in RAM to disk
+func (b *Bitcask) saveIndex() error {
+	tempIdx := "temp_index"
+	if err := b.indexer.Save(b.trie, filepath.Join(b.path, tempIdx)); err != nil {
+		return err
+	}
+	err := os.Rename(filepath.Join(b.path, tempIdx), filepath.Join(b.path, "index"))
+	if err != nil {
+		return err
+	}
+	b.metadata.IndexUpToDate = true
+	return b.metadata.Save(filepath.Join(b.path, "meta.json"), b.config.DirFileModeBeforeUmask)
 }
 
 func loadDatafiles(path string, maxKeySize uint32, maxValueSize uint64, fileModeBeforeUmask os.FileMode) (datafiles map[int]data.Datafile, lastID int, err error) {
@@ -508,34 +547,56 @@ func getSortedDatafiles(datafiles map[int]data.Datafile) []data.Datafile {
 	return out
 }
 
-func loadIndex(path string, indexer index.Indexer, maxKeySize uint32, datafiles map[int]data.Datafile) (art.Tree, error) {
+func loadIndex(path string, indexer index.Indexer, maxKeySize uint32, datafiles map[int]data.Datafile, lastID int, indexUpToDate bool) (art.Tree, error) {
 	t, found, err := indexer.Load(filepath.Join(path, "index"), maxKeySize)
 	if err != nil {
 		return nil, err
 	}
-	if !found {
-		sortedDatafiles := getSortedDatafiles(datafiles)
-		for _, df := range sortedDatafiles {
-			var offset int64
-			for {
-				e, n, err := df.Read()
-				if err != nil {
-					if err == io.EOF {
-						break
-					}
-					return nil, err
-				}
-				// Tombstone value  (deleted key)
-				if len(e.Value) == 0 {
-					t.Delete(e.Key)
-					offset += n
-					continue
-				}
-				item := internal.Item{FileID: df.FileID(), Offset: offset, Size: n}
-				t.Insert(e.Key, item)
-				offset += n
-			}
+	if found && indexUpToDate {
+		return t, nil
+	}
+	if found {
+		if err := loadIndexFromDatafile(t, datafiles[lastID]); err != nil {
+			return nil, err
+		}
+		return t, nil
+	}
+	sortedDatafiles := getSortedDatafiles(datafiles)
+	for _, df := range sortedDatafiles {
+		if err := loadIndexFromDatafile(t, df); err != nil {
+			return nil, err
 		}
 	}
 	return t, nil
+}
+
+func loadIndexFromDatafile(t art.Tree, df data.Datafile) error {
+	var offset int64
+	for {
+		e, n, err := df.Read()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return err
+		}
+		// Tombstone value  (deleted key)
+		if len(e.Value) == 0 {
+			t.Delete(e.Key)
+			offset += n
+			continue
+		}
+		item := internal.Item{FileID: df.FileID(), Offset: offset, Size: n}
+		t.Insert(e.Key, item)
+		offset += n
+	}
+	return nil
+}
+
+func loadMetadata(path string) (*metadata.MetaData, error) {
+	if !internal.Exists(filepath.Join(path, "meta.json")) {
+		meta := new(metadata.MetaData)
+		return meta, nil
+	}
+	return metadata.Load(filepath.Join(path, "meta.json"))
 }

@@ -1208,7 +1208,7 @@ func TestCloseErrors(t *testing.T) {
 		assert.NoError(err)
 
 		mockIndexer := new(mocks.Indexer)
-		mockIndexer.On("Save", db.trie, filepath.Join(db.path, "index")).Return(ErrMockError)
+		mockIndexer.On("Save", db.trie, filepath.Join(db.path, "temp_index")).Return(ErrMockError)
 		db.indexer = mockIndexer
 
 		err = db.Close()
