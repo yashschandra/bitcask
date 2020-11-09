@@ -136,6 +136,14 @@ func TestAll(t *testing.T) {
 		assert.NoError(err)
 	})
 
+	t.Run("Backup", func(t *testing.T) {
+		path, err := ioutil.TempDir("", "backup")
+		defer os.RemoveAll(path)
+		assert.NoError(err)
+		err = db.Backup(path)
+		assert.NoError(err)
+	})
+
 	t.Run("Close", func(t *testing.T) {
 		err = db.Close()
 		assert.NoError(err)

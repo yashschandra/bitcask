@@ -491,8 +491,9 @@ func Open(path string, options ...Option) (*Bitcask, error) {
 }
 
 // Backup copies db directory to given path
+// it excludes lock file from getting copied
 func (b *Bitcask) Backup(path string) error {
-	return internal.Copy(b.path, path)
+	return internal.Copy(b.path, path, []string{"lock"})
 }
 
 // saveIndex saves index currently in RAM to disk

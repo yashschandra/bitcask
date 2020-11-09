@@ -67,11 +67,20 @@ func ParseIds(fns []string) ([]int, error) {
 }
 
 // Copy copies source contents to destination
-func Copy(src, dst string) error {
+func Copy(src, dst string, exclude []string) error {
 	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
 		relPath := strings.Replace(path, src, "", 1)
 		if relPath == "" {
 			return nil
+		}
+		for _, e := range exclude {
+			matched, err := filepath.Match(e, info.Name())
+			if err != nil {
+				return err
+			}
+			if matched {
+				return nil
+			}
 		}
 		if info.IsDir() {
 			return os.Mkdir(filepath.Join(dst, relPath), info.Mode())
