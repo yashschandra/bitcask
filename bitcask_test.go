@@ -140,7 +140,7 @@ func TestAll(t *testing.T) {
 		path, err := ioutil.TempDir("", "backup")
 		defer os.RemoveAll(path)
 		assert.NoError(err)
-		err = db.Backup(path)
+		err = db.Backup(filepath.Join(path, "db-backup"))
 		assert.NoError(err)
 	})
 
