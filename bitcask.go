@@ -3,7 +3,6 @@ package bitcask
 import (
 	"errors"
 	"fmt"
-	"github.com/prologic/bitcask/internal/data/codec"
 	"hash/crc32"
 	"io"
 	"io/ioutil"
@@ -18,6 +17,7 @@ import (
 	"github.com/prologic/bitcask/internal"
 	"github.com/prologic/bitcask/internal/config"
 	"github.com/prologic/bitcask/internal/data"
+	"github.com/prologic/bitcask/internal/data/codec"
 	"github.com/prologic/bitcask/internal/index"
 	"github.com/prologic/bitcask/internal/metadata"
 )
