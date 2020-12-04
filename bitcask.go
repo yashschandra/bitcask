@@ -249,6 +249,7 @@ func (b *Bitcask) DeleteAll() (err error) {
 // the function `f` with the keys found. If the function returns an error
 // no further keys are processed and the first error returned.
 func (b *Bitcask) Scan(prefix []byte, f func(key []byte) error) (err error) {
+	fmt.Println("trie ->", b.trie)
 	b.trie.ForEachPrefix(prefix, func(node art.Node) bool {
 		// Skip the root node
 		if len(node.Key()) == 0 {
@@ -338,6 +339,33 @@ func (b *Bitcask) put(key, value []byte) (int64, int64, error) {
 	return b.curr.Write(e)
 }
 
+// closeCurrentFile closes current datafile and makes it read only.
+func (b *Bitcask) closeCurrentFile() error {
+	err := b.curr.Close()
+	if err != nil {
+		return err
+	}
+	id := b.curr.FileID()
+	df, err := data.NewDatafile(b.path, id, true, b.config.MaxKeySize, b.config.MaxValueSize, b.config.FileFileModeBeforeUmask)
+	if err != nil {
+		return err
+	}
+
+	b.datafiles[id] = df
+	return nil
+}
+
+// openNewWritableFile opens new datafile for writing data
+func (b *Bitcask) openNewWritableFile() error {
+	id := b.curr.FileID() + 1
+	curr, err := data.NewDatafile(b.path, id, false, b.config.MaxKeySize, b.config.MaxValueSize, b.config.FileFileModeBeforeUmask)
+	if err != nil {
+		return err
+	}
+	b.curr = curr
+	return nil
+}
+
 func (b *Bitcask) Reopen() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -367,7 +395,24 @@ func (b *Bitcask) Reopen() error {
 // and deleted keys removes. Duplicate key/value pairs are also removed.
 // Call this function periodically to reclaim disk space.
 func (b *Bitcask) Merge() error {
-	// Temporary merged database path
+	b.mu.RLock()
+	err := b.closeCurrentFile()
+	if err != nil {
+		b.mu.RUnlock()
+		return err
+	}
+	filesToMerge := make([]int, 0, len(b.datafiles))
+	for k := range b.datafiles {
+		filesToMerge = append(filesToMerge, k)
+	}
+	err = b.openNewWritableFile()
+	if err != nil {
+		b.mu.RUnlock()
+		return err
+	}
+	b.mu.RUnlock()
+	sort.Ints(filesToMerge)
+
 	temp, err := ioutil.TempDir(b.path, "merge")
 	if err != nil {
 		return err
@@ -384,6 +429,11 @@ func (b *Bitcask) Merge() error {
 	// Doing this automatically strips deleted keys and
 	// old key/value pairs
 	err = b.Fold(func(key []byte) error {
+		item, _ := b.trie.Search(key)
+		// if key was updated after start of merge operation, nothing to do
+		if item.(internal.Item).FileID > filesToMerge[len(filesToMerge)-1] {
+			return nil
+		}
 		value, err := b.Get(key)
 		if err != nil {
 			return err
@@ -398,29 +448,33 @@ func (b *Bitcask) Merge() error {
 	if err != nil {
 		return err
 	}
-
-	err = mdb.Close()
-	if err != nil {
+	if err = mdb.Close(); err != nil {
+		return err
+	}
+	if err = b.Close(); err != nil {
 		return err
 	}
 
-	// Close the database
-	err = b.Close()
-	if err != nil {
-		return err
-	}
-
-	// Remove all data files
+	// Remove data files
 	files, err := ioutil.ReadDir(b.path)
 	if err != nil {
 		return err
 	}
 	for _, file := range files {
-		if !file.IsDir() {
-			err := os.RemoveAll(path.Join([]string{b.path, file.Name()}...))
-			if err != nil {
-				return err
-			}
+		if file.IsDir() {
+			continue
+		}
+		ids, err := internal.ParseIds([]string{file.Name()})
+		if err != nil {
+			return err
+		}
+		// if datafile was created after start of merge, skip
+		if len(ids) > 0 && ids[0] > filesToMerge[len(filesToMerge)-1] {
+			continue
+		}
+		err = os.RemoveAll(path.Join(b.path, file.Name()))
+		if err != nil {
+			return err
 		}
 	}
 
