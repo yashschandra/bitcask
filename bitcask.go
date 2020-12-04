@@ -249,7 +249,6 @@ func (b *Bitcask) DeleteAll() (err error) {
 // the function `f` with the keys found. If the function returns an error
 // no further keys are processed and the first error returned.
 func (b *Bitcask) Scan(prefix []byte, f func(key []byte) error) (err error) {
-	fmt.Println("trie ->", b.trie)
 	b.trie.ForEachPrefix(prefix, func(node art.Node) bool {
 		// Skip the root node
 		if len(node.Key()) == 0 {
