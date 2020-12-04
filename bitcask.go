@@ -412,6 +412,7 @@ func (b *Bitcask) Merge() error {
 	b.mu.RUnlock()
 	sort.Ints(filesToMerge)
 
+	// Temporary merged database path
 	temp, err := ioutil.TempDir(b.path, "merge")
 	if err != nil {
 		return err
