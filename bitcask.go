@@ -44,6 +44,10 @@ var (
 	// ErrDatabaseLocked is the error returned if the database is locked
 	// (typically opened by another process)
 	ErrDatabaseLocked = errors.New("error: database locked")
+
+	// ErrMergeInProgress is the error returned if merge is called when already a merge
+	// is in progress
+	ErrMergeInProgress = errors.New("error: merge already in progress")
 )
 
 // Bitcask is a struct that represents a on-disk LSM and WAL data structure
@@ -62,6 +66,7 @@ type Bitcask struct {
 	trie      art.Tree
 	indexer   index.Indexer
 	metadata  *metadata.MetaData
+	isMerging bool
 }
 
 // Stats is a struct returned by Stats() on an open Bitcask instance
@@ -394,6 +399,16 @@ func (b *Bitcask) Reopen() error {
 // and deleted keys removes. Duplicate key/value pairs are also removed.
 // Call this function periodically to reclaim disk space.
 func (b *Bitcask) Merge() error {
+	b.mu.Lock()
+	if b.isMerging {
+		b.mu.Unlock()
+		return ErrMergeInProgress
+	}
+	b.isMerging = true
+	b.mu.Unlock()
+	defer func() {
+		b.isMerging = false
+	}()
 	b.mu.RLock()
 	err := b.closeCurrentFile()
 	if err != nil {
