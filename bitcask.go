@@ -128,15 +128,21 @@ func (b *Bitcask) Sync() error {
 	return b.curr.Sync()
 }
 
-// Get retrieves the value of the given key. If the key is not found or an/I/O
-// error occurs a null byte slice is returned along with the error.
+// Get fetches value for given key
 func (b *Bitcask) Get(key []byte) ([]byte, error) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	return b.get(key)
+}
+
+// get retrieves the value of the given key. If the key is not found or an/I/O
+// error occurs a null byte slice is returned along with the error.
+func (b *Bitcask) get(key []byte) ([]byte, error) {
 	var df data.Datafile
 
-	b.mu.RLock()
 	value, found := b.trie.Search(key)
 	if !found {
-		b.mu.RUnlock()
 		return nil, ErrKeyNotFound
 	}
 
@@ -149,7 +155,6 @@ func (b *Bitcask) Get(key []byte) ([]byte, error) {
 	}
 
 	e, err := df.ReadAt(item.Offset, item.Size)
-	b.mu.RUnlock()
 	if err != nil {
 		return nil, err
 	}
@@ -449,7 +454,7 @@ func (b *Bitcask) Merge() error {
 		if item.(internal.Item).FileID > filesToMerge[len(filesToMerge)-1] {
 			return nil
 		}
-		value, err := b.Get(key)
+		value, err := b.get(key)
 		if err != nil {
 			return err
 		}
