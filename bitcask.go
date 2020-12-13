@@ -105,12 +105,13 @@ func (b *Bitcask) Stats() (stats Stats, err error) {
 // database.
 func (b *Bitcask) Close() error {
 	b.mu.RLock()
+	defer b.mu.RUnlock()
 
-	defer func() {
-		b.mu.RUnlock()
-		b.Flock.Unlock()
-	}()
+	return b.close()
+}
 
+func (b *Bitcask) close() error {
+	defer b.Flock.Unlock()
 	if err := b.saveIndex(); err != nil {
 		return err
 	}
@@ -405,6 +406,12 @@ func (b *Bitcask) Reopen() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	return b.reopen()
+}
+
+// reopen reloads a bitcask object with index and datafiles
+// caller of this method should take care of locking
+func (b *Bitcask) reopen() error {
 	datafiles, lastID, err := loadDatafiles(b.path, b.config.MaxKeySize, b.config.MaxValueSize, b.config.FileFileModeBeforeUmask)
 	if err != nil {
 		return err
@@ -502,7 +509,10 @@ func (b *Bitcask) Merge() error {
 	if err = mdb.Close(); err != nil {
 		return err
 	}
-	if err = b.Close(); err != nil {
+	// no reads and writes till we reopen
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if err = b.close(); err != nil {
 		return err
 	}
 
@@ -546,7 +556,7 @@ func (b *Bitcask) Merge() error {
 	b.metadata.ReclaimableSpace = 0
 
 	// And finally reopen the database
-	return b.Reopen()
+	return b.reopen()
 }
 
 // Open opens the database at the given path with optional options.
