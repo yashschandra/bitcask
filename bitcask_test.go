@@ -9,7 +9,6 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -52,12 +51,6 @@ func SortByteArrays(src [][]byte) [][]byte {
 	sorted := sortByteArrays(src)
 	sort.Sort(sorted)
 	return sorted
-}
-
-func skipIfWindows(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Skipping this test on Windows")
-	}
 }
 
 func TestAll(t *testing.T) {
@@ -146,6 +139,14 @@ func TestAll(t *testing.T) {
 
 	t.Run("Sync", func(t *testing.T) {
 		err = db.Sync()
+		assert.NoError(err)
+	})
+
+	t.Run("Backup", func(t *testing.T) {
+		path, err := ioutil.TempDir("", "backup")
+		defer os.RemoveAll(path)
+		assert.NoError(err)
+		err = db.Backup(filepath.Join(path, "db-backup"))
 		assert.NoError(err)
 	})
 
@@ -319,6 +320,64 @@ func TestDeletedKeys(t *testing.T) {
 	})
 }
 
+func TestMetadata(t *testing.T) {
+	assert := assert.New(t)
+	testdir, err := ioutil.TempDir("", "bitcask")
+	assert.NoError(err)
+	defer os.RemoveAll(testdir)
+
+	db, err := Open(testdir)
+	assert.NoError(err)
+	err = db.Put([]byte("foo"), []byte("bar"))
+	assert.NoError(err)
+	err = db.Close()
+	assert.NoError(err)
+	db, err = Open(testdir)
+	assert.NoError(err)
+
+	t.Run("IndexUptoDateAfterCloseAndOpen", func(t *testing.T) {
+		assert.Equal(true, db.metadata.IndexUpToDate)
+	})
+	t.Run("IndexUptoDateAfterPut", func(t *testing.T) {
+		assert.NoError(db.Put([]byte("foo1"), []byte("bar1")))
+		assert.Equal(false, db.metadata.IndexUpToDate)
+	})
+	t.Run("Reclaimable", func(t *testing.T) {
+		assert.Equal(int64(0), db.Reclaimable())
+	})
+	t.Run("ReclaimableAfterNewPut", func(t *testing.T) {
+		assert.NoError(db.Put([]byte("hello"), []byte("world")))
+		assert.Equal(int64(0), db.Reclaimable())
+	})
+	t.Run("ReclaimableAfterRepeatedPut", func(t *testing.T) {
+		assert.NoError(db.Put([]byte("hello"), []byte("world")))
+		assert.Equal(int64(34), db.Reclaimable())
+	})
+	t.Run("ReclaimableAfterDelete", func(t *testing.T) {
+		assert.NoError(db.Delete([]byte("hello")))
+		assert.Equal(int64(97), db.Reclaimable())
+	})
+	t.Run("ReclaimableAfterNonExistingDelete", func(t *testing.T) {
+		assert.NoError(db.Delete([]byte("hello1")))
+		assert.Equal(int64(97), db.Reclaimable())
+	})
+	t.Run("ReclaimableAfterDeleteAll", func(t *testing.T) {
+		assert.NoError(db.DeleteAll())
+		assert.Equal(int64(214), db.Reclaimable())
+	})
+	t.Run("ReclaimableAfterMerge", func(t *testing.T) {
+		assert.NoError(db.Merge())
+		assert.Equal(int64(0), db.Reclaimable())
+	})
+	t.Run("IndexUptoDateAfterMerge", func(t *testing.T) {
+		assert.Equal(true, db.metadata.IndexUpToDate)
+	})
+	t.Run("ReclaimableAfterMergeAndDeleteAll", func(t *testing.T) {
+		assert.NoError(db.DeleteAll())
+		assert.Equal(int64(0), db.Reclaimable())
+	})
+}
+
 func TestConfigErrors(t *testing.T) {
 	assert := assert.New(t)
 
@@ -350,9 +409,6 @@ func TestConfigErrors(t *testing.T) {
 }
 
 func TestAutoRecovery(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.SkipNow()
-	}
 	withAutoRecovery := []bool{false, true}
 
 	for _, autoRecovery := range withAutoRecovery {
@@ -720,8 +776,6 @@ func TestStatsError(t *testing.T) {
 	})
 
 	t.Run("Test", func(t *testing.T) {
-		skipIfWindows(t)
-
 		t.Run("FabricatedDestruction", func(t *testing.T) {
 			// This would never happen in reality :D
 			// Or would it? :)
@@ -737,8 +791,6 @@ func TestStatsError(t *testing.T) {
 }
 
 func TestDirFileModeBeforeUmask(t *testing.T) {
-	skipIfWindows(t)
-
 	assert := assert.New(t)
 
 	t.Run("Setup", func(t *testing.T) {
@@ -821,8 +873,6 @@ func TestDirFileModeBeforeUmask(t *testing.T) {
 }
 
 func TestFileFileModeBeforeUmask(t *testing.T) {
-	skipIfWindows(t)
-
 	assert := assert.New(t)
 
 	t.Run("Setup", func(t *testing.T) {
@@ -997,7 +1047,7 @@ func TestMerge(t *testing.T) {
 
 		s3, err := db.Stats()
 		assert.NoError(err)
-		assert.Equal(1, s3.Datafiles)
+		assert.Equal(2, s3.Datafiles)
 		assert.Equal(1, s3.Keys)
 		assert.True(s3.Size > s1.Size)
 		assert.True(s3.Size < s2.Size)
@@ -1221,7 +1271,7 @@ func TestCloseErrors(t *testing.T) {
 		assert.NoError(err)
 
 		mockIndexer := new(mocks.Indexer)
-		mockIndexer.On("Save", db.trie, filepath.Join(db.path, "index")).Return(ErrMockError)
+		mockIndexer.On("Save", db.trie, filepath.Join(db.path, "temp_index")).Return(ErrMockError)
 		db.indexer = mockIndexer
 
 		err = db.Close()
@@ -1292,8 +1342,6 @@ func TestMergeErrors(t *testing.T) {
 	assert := assert.New(t)
 
 	t.Run("RemoveDatabaseDirectory", func(t *testing.T) {
-		skipIfWindows(t)
-
 		testdir, err := ioutil.TempDir("", "bitcask")
 		assert.NoError(err)
 		defer os.RemoveAll(testdir)
@@ -1329,18 +1377,19 @@ func TestMergeErrors(t *testing.T) {
 		assert.NoError(err)
 		defer os.RemoveAll(testdir)
 
-		db, err := Open(testdir)
+		db, err := Open(testdir, WithMaxDatafileSize(22))
 		assert.NoError(err)
 
 		assert.NoError(db.Put([]byte("foo"), []byte("bar")))
+		assert.NoError(db.Put([]byte("bar"), []byte("baz")))
 
 		mockDatafile := new(mocks.Datafile)
-		mockDatafile.On("FileID").Return(0)
+		mockDatafile.On("Close").Return(nil)
 		mockDatafile.On("ReadAt", int64(0), int64(30)).Return(
 			internal.Entry{},
 			ErrMockError,
 		)
-		db.curr = mockDatafile
+		db.datafiles[0] = mockDatafile
 
 		err = db.Merge()
 		assert.Error(err)
@@ -1418,6 +1467,92 @@ func TestConcurrent(t *testing.T) {
 
 			wg.Wait()
 		})
+
+		// Test concurrent Put() with concurrent Scan()
+		t.Run("PutScan", func(t *testing.T) {
+			doPut := func(wg *sync.WaitGroup, x int) {
+				defer func() {
+					wg.Done()
+				}()
+				for i := 0; i <= 100; i++ {
+					if i%x == 0 {
+						key := []byte(fmt.Sprintf("k%d", i))
+						value := []byte(fmt.Sprintf("v%d", i))
+						err := db.Put(key, value)
+						assert.NoError(err)
+					}
+				}
+			}
+
+			doScan := func(wg *sync.WaitGroup, x int) {
+				defer func() {
+					wg.Done()
+				}()
+				for i := 0; i <= 100; i++ {
+					if i%x == 0 {
+						err := db.Scan([]byte("k"), func(key []byte) error {
+							return nil
+						})
+						assert.NoError(err)
+					}
+				}
+			}
+
+			wg := &sync.WaitGroup{}
+			wg.Add(6)
+
+			go doPut(wg, 2)
+			go doPut(wg, 3)
+			go doPut(wg, 5)
+			go doScan(wg, 1)
+			go doScan(wg, 2)
+			go doScan(wg, 4)
+
+			wg.Wait()
+		})
+
+		// XXX: This has data races
+		/* Test concurrent Scan() with concurrent Merge()
+		t.Run("ScanMerge", func(t *testing.T) {
+			doScan := func(wg *sync.WaitGroup, x int) {
+				defer func() {
+					wg.Done()
+				}()
+				for i := 0; i <= 100; i++ {
+					if i%x == 0 {
+						err := db.Scan([]byte("k"), func(key []byte) error {
+							return nil
+						})
+						assert.NoError(err)
+					}
+				}
+			}
+
+			doMerge := func(wg *sync.WaitGroup, x int) {
+				defer func() {
+					wg.Done()
+				}()
+				for i := 0; i <= 100; i++ {
+					if i%x == 0 {
+						err := db.Merge()
+						assert.NoError(err)
+					}
+				}
+			}
+
+			wg := &sync.WaitGroup{}
+			wg.Add(6)
+
+			go doScan(wg, 2)
+			go doScan(wg, 3)
+			go doScan(wg, 5)
+			go doMerge(wg, 1)
+			go doMerge(wg, 2)
+			go doMerge(wg, 4)
+
+			wg.Wait()
+		})
+		*/
 
 		t.Run("Close", func(t *testing.T) {
 			err = db.Close()
@@ -1498,7 +1633,6 @@ func TestLocking(t *testing.T) {
 
 	_, err = Open(testdir)
 	assert.Error(err)
-	assert.Equal(ErrDatabaseLocked, err)
 }
 
 type benchmarkTestCase struct {

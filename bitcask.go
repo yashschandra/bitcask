@@ -13,12 +13,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gofrs/flock"
 	art "github.com/plar/go-adaptive-radix-tree"
+	"github.com/prologic/bitcask/flock"
 	"github.com/prologic/bitcask/internal"
 	"github.com/prologic/bitcask/internal/config"
 	"github.com/prologic/bitcask/internal/data"
+	"github.com/prologic/bitcask/internal/data/codec"
 	"github.com/prologic/bitcask/internal/index"
+	"github.com/prologic/bitcask/internal/metadata"
 	"github.com/prologic/bitcask/scripts/migrations"
 	log "github.com/sirupsen/logrus"
 )
@@ -51,6 +53,10 @@ var (
 	ErrDatabaseLocked = errors.New("error: database locked")
 
 	ErrInvalidVersion = errors.New("error: invalid db version")
+
+	// ErrMergeInProgress is the error returned if merge is called when already a merge
+	// is in progress
+	ErrMergeInProgress = errors.New("error: merge already in progress")
 )
 
 // Bitcask is a struct that represents a on-disk LSM and WAL data structure
@@ -68,6 +74,8 @@ type Bitcask struct {
 	datafiles map[int]data.Datafile
 	trie      art.Tree
 	indexer   index.Indexer
+	metadata  *metadata.MetaData
+	isMerging bool
 }
 
 // Stats is a struct returned by Stats() on an open Bitcask instance
@@ -101,10 +109,14 @@ func (b *Bitcask) Close() error {
 	defer func() {
 		b.mu.RUnlock()
 		b.Flock.Unlock()
-		os.Remove(b.Flock.Path())
 	}()
 
-	if err := b.indexer.Save(b.trie, filepath.Join(b.path, "index")); err != nil {
+	if err := b.saveIndex(); err != nil {
+		return err
+	}
+
+	b.metadata.IndexUpToDate = true
+	if err := b.saveMetadata(); err != nil {
 		return err
 	}
 
@@ -126,6 +138,8 @@ func (b *Bitcask) Sync() error {
 
 // Get fetches value for a key
 func (b *Bitcask) Get(key []byte) ([]byte, error) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
 	e, err := b.get(key)
 	if err != nil {
 		return nil, err
@@ -146,10 +160,10 @@ func (b *Bitcask) Put(key, value []byte, options ...PutOptions) error {
 	if len(key) == 0 {
 		return ErrEmptyKey
 	}
-	if uint32(len(key)) > b.config.MaxKeySize {
+	if b.config.MaxKeySize > 0 && uint32(len(key)) > b.config.MaxKeySize {
 		return ErrKeyTooLarge
 	}
-	if uint64(len(value)) > b.config.MaxValueSize {
+	if b.config.MaxValueSize > 0 && uint64(len(value)) > b.config.MaxValueSize {
 		return ErrValueTooLarge
 	}
 	var feature Feature
@@ -160,37 +174,54 @@ func (b *Bitcask) Put(key, value []byte, options ...PutOptions) error {
 	}
 
 	b.mu.Lock()
+	defer b.mu.Unlock()
 	offset, n, err := b.put(key, value, feature)
 	if err != nil {
-		b.mu.Unlock()
 		return err
 	}
 
 	if b.config.Sync {
 		if err := b.curr.Sync(); err != nil {
-			b.mu.Unlock()
 			return err
 		}
 	}
 
+	// in case of successful `put`, IndexUpToDate will be always be false
+	if b.metadata.IndexUpToDate {
+		b.metadata.IndexUpToDate = false
+		if err := b.saveMetadata(); err != nil {
+			return err
+		}
+	}
+
+	if oldItem, found := b.trie.Search(key); found {
+		b.metadata.ReclaimableSpace += oldItem.(internal.Item).Size
+	}
+
 	item := internal.Item{FileID: b.curr.FileID(), Offset: offset, Size: n}
 	b.trie.Insert(key, item)
-	b.mu.Unlock()
 
 	return nil
 }
 
-// Delete deletes the named key. If the key doesn't exist or an I/O error
-// occurs the error is returned.
+// Delete deletes the named key.
 func (b *Bitcask) Delete(key []byte) error {
 	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.delete(key)
+}
+
+// delete deletes the named key. If the key doesn't exist or an I/O error
+// occurs the error is returned.
+func (b *Bitcask) delete(key []byte) error {
 	_, _, err := b.put(key, []byte{}, Feature{})
 	if err != nil {
-		b.mu.Unlock()
 		return err
 	}
+	if item, found := b.trie.Search(key); found {
+		b.metadata.ReclaimableSpace += item.(internal.Item).Size + codec.MetaInfoSize + int64(len(key))
+	}
 	b.trie.Delete(key)
-	b.mu.Unlock()
 
 	return nil
 }
@@ -202,7 +233,12 @@ func (b *Bitcask) DeleteAll() (err error) {
 
 	b.trie.ForEach(func(node art.Node) bool {
 		_, _, err = b.put(node.Key(), []byte{}, Feature{})
-		return err == nil
+		if err != nil {
+			return false
+		}
+		item, _ := b.trie.Search(node.Key())
+		b.metadata.ReclaimableSpace += item.(internal.Item).Size + codec.MetaInfoSize + int64(len(node.Key()))
+		return true
 	})
 	b.trie = art.New()
 
@@ -273,10 +309,8 @@ func (b *Bitcask) Fold(f func(key []byte) error) (err error) {
 func (b *Bitcask) get(key []byte) (internal.Entry, error) {
 	var df data.Datafile
 
-	b.mu.RLock()
 	value, found := b.trie.Search(key)
 	if !found {
-		b.mu.RUnlock()
 		return internal.Entry{}, ErrKeyNotFound
 	}
 
@@ -289,13 +323,12 @@ func (b *Bitcask) get(key []byte) (internal.Entry, error) {
 	}
 
 	e, err := df.ReadAt(item.Offset, item.Size)
-	b.mu.RUnlock()
 	if err != nil {
 		return internal.Entry{}, err
 	}
 
 	if e.Expiry != nil && e.Expiry.Before(time.Now().UTC()) {
-		go b.Delete(key)
+		_ = b.delete(key) // we don't care if it doesnt succeed
 		return internal.Entry{}, ErrKeyExpired
 	}
 
@@ -331,10 +364,41 @@ func (b *Bitcask) put(key, value []byte, feature Feature) (int64, int64, error) 
 			return -1, 0, err
 		}
 		b.curr = curr
+		err = b.saveIndex()
+		if err != nil {
+			return -1, 0, err
+		}
 	}
 
 	e := internal.NewEntry(key, value, feature.Expiry)
 	return b.curr.Write(e)
+}
+
+// closeCurrentFile closes current datafile and makes it read only.
+func (b *Bitcask) closeCurrentFile() error {
+	err := b.curr.Close()
+	if err != nil {
+		return err
+	}
+	id := b.curr.FileID()
+	df, err := data.NewDatafile(b.path, id, true, b.config.MaxKeySize, b.config.MaxValueSize, b.config.FileFileModeBeforeUmask)
+	if err != nil {
+		return err
+	}
+
+	b.datafiles[id] = df
+	return nil
+}
+
+// openNewWritableFile opens new datafile for writing data
+func (b *Bitcask) openNewWritableFile() error {
+	id := b.curr.FileID() + 1
+	curr, err := data.NewDatafile(b.path, id, false, b.config.MaxKeySize, b.config.MaxValueSize, b.config.FileFileModeBeforeUmask)
+	if err != nil {
+		return err
+	}
+	b.curr = curr
+	return nil
 }
 
 func (b *Bitcask) Reopen() error {
@@ -345,7 +409,7 @@ func (b *Bitcask) Reopen() error {
 	if err != nil {
 		return err
 	}
-	t, err := loadIndex(b.path, b.indexer, b.config.MaxKeySize, datafiles)
+	t, err := loadIndex(b.path, b.indexer, b.config.MaxKeySize, datafiles, lastID, b.metadata.IndexUpToDate)
 	if err != nil {
 		return err
 	}
@@ -366,6 +430,34 @@ func (b *Bitcask) Reopen() error {
 // and deleted keys removes. Duplicate key/value pairs are also removed.
 // Call this function periodically to reclaim disk space.
 func (b *Bitcask) Merge() error {
+	b.mu.Lock()
+	if b.isMerging {
+		b.mu.Unlock()
+		return ErrMergeInProgress
+	}
+	b.isMerging = true
+	b.mu.Unlock()
+	defer func() {
+		b.isMerging = false
+	}()
+	b.mu.RLock()
+	err := b.closeCurrentFile()
+	if err != nil {
+		b.mu.RUnlock()
+		return err
+	}
+	filesToMerge := make([]int, 0, len(b.datafiles))
+	for k := range b.datafiles {
+		filesToMerge = append(filesToMerge, k)
+	}
+	err = b.openNewWritableFile()
+	if err != nil {
+		b.mu.RUnlock()
+		return err
+	}
+	b.mu.RUnlock()
+	sort.Ints(filesToMerge)
+
 	// Temporary merged database path
 	temp, err := ioutil.TempDir(b.path, "merge")
 	if err != nil {
@@ -383,6 +475,11 @@ func (b *Bitcask) Merge() error {
 	// Doing this automatically strips deleted keys and
 	// old key/value pairs
 	err = b.Fold(func(key []byte) error {
+		item, _ := b.trie.Search(key)
+		// if key was updated after start of merge operation, nothing to do
+		if item.(internal.Item).FileID > filesToMerge[len(filesToMerge)-1] {
+			return nil
+		}
 		e, err := b.get(key)
 		if err != nil {
 			return err
@@ -402,29 +499,33 @@ func (b *Bitcask) Merge() error {
 	if err != nil {
 		return err
 	}
-
-	err = mdb.Close()
-	if err != nil {
+	if err = mdb.Close(); err != nil {
+		return err
+	}
+	if err = b.Close(); err != nil {
 		return err
 	}
 
-	// Close the database
-	err = b.Close()
-	if err != nil {
-		return err
-	}
-
-	// Remove all data files
+	// Remove data files
 	files, err := ioutil.ReadDir(b.path)
 	if err != nil {
 		return err
 	}
 	for _, file := range files {
-		if !file.IsDir() {
-			err := os.RemoveAll(path.Join([]string{b.path, file.Name()}...))
-			if err != nil {
-				return err
-			}
+		if file.IsDir() {
+			continue
+		}
+		ids, err := internal.ParseIds([]string{file.Name()})
+		if err != nil {
+			return err
+		}
+		// if datafile was created after start of merge, skip
+		if len(ids) > 0 && ids[0] > filesToMerge[len(filesToMerge)-1] {
+			continue
+		}
+		err = os.RemoveAll(path.Join(b.path, file.Name()))
+		if err != nil {
+			return err
 		}
 	}
 
@@ -442,6 +543,7 @@ func (b *Bitcask) Merge() error {
 			return err
 		}
 	}
+	b.metadata.ReclaimableSpace = 0
 
 	// And finally reopen the database
 	return b.Reopen()
@@ -452,8 +554,9 @@ func (b *Bitcask) Merge() error {
 // configuration options as functions.
 func Open(path string, options ...Option) (*Bitcask, error) {
 	var (
-		cfg *config.Config
-		err error
+		cfg  *config.Config
+		err  error
+		meta *metadata.MetaData
 	)
 
 	configPath := filepath.Join(path, "config.json")
@@ -480,12 +583,18 @@ func Open(path string, options ...Option) (*Bitcask, error) {
 		return nil, err
 	}
 
+	meta, err = loadMetadata(path)
+	if err != nil {
+		return nil, err
+	}
+
 	bitcask := &Bitcask{
-		Flock:   flock.New(filepath.Join(path, "lock")),
-		config:  cfg,
-		options: options,
-		path:    path,
-		indexer: index.NewIndexer(),
+		Flock:    flock.New(filepath.Join(path, "lock")),
+		config:   cfg,
+		options:  options,
+		path:     path,
+		indexer:  index.NewIndexer(),
+		metadata: meta,
 	}
 
 	locked, err := bitcask.Flock.TryLock()
@@ -531,6 +640,36 @@ func checkAndUpgrade(cfg *config.Config, configPath string) error {
 	return nil
 }
 
+// Backup copies db directory to given path
+// it creates path if it does not exist
+func (b *Bitcask) Backup(path string) error {
+	if !internal.Exists(path) {
+		if err := os.MkdirAll(path, b.config.DirFileModeBeforeUmask); err != nil {
+			return err
+		}
+	}
+	return internal.Copy(b.path, path, []string{"lock"})
+}
+
+// saveIndex saves index currently in RAM to disk
+func (b *Bitcask) saveIndex() error {
+	tempIdx := "temp_index"
+	if err := b.indexer.Save(b.trie, filepath.Join(b.path, tempIdx)); err != nil {
+		return err
+	}
+	return os.Rename(filepath.Join(b.path, tempIdx), filepath.Join(b.path, "index"))
+}
+
+// saveMetadata saves metadata into disk
+func (b *Bitcask) saveMetadata() error {
+	return b.metadata.Save(filepath.Join(b.path, "meta.json"), b.config.DirFileModeBeforeUmask)
+}
+
+// Reclaimable returns space that can be reclaimed
+func (b *Bitcask) Reclaimable() int64 {
+	return b.metadata.ReclaimableSpace
+}
+
 func loadDatafiles(path string, maxKeySize uint32, maxValueSize uint64, fileModeBeforeUmask os.FileMode) (datafiles map[int]data.Datafile, lastID int, err error) {
 	fns, err := internal.GetDatafiles(path)
 	if err != nil {
@@ -569,34 +708,56 @@ func getSortedDatafiles(datafiles map[int]data.Datafile) []data.Datafile {
 	return out
 }
 
-func loadIndex(path string, indexer index.Indexer, maxKeySize uint32, datafiles map[int]data.Datafile) (art.Tree, error) {
+func loadIndex(path string, indexer index.Indexer, maxKeySize uint32, datafiles map[int]data.Datafile, lastID int, indexUpToDate bool) (art.Tree, error) {
 	t, found, err := indexer.Load(filepath.Join(path, "index"), maxKeySize)
 	if err != nil {
 		return nil, err
 	}
-	if !found {
-		sortedDatafiles := getSortedDatafiles(datafiles)
-		for _, df := range sortedDatafiles {
-			var offset int64
-			for {
-				e, n, err := df.Read()
-				if err != nil {
-					if err == io.EOF {
-						break
-					}
-					return nil, err
-				}
-				// Tombstone value  (deleted key)
-				if len(e.Value) == 0 {
-					t.Delete(e.Key)
-					offset += n
-					continue
-				}
-				item := internal.Item{FileID: df.FileID(), Offset: offset, Size: n}
-				t.Insert(e.Key, item)
-				offset += n
-			}
+	if found && indexUpToDate {
+		return t, nil
+	}
+	if found {
+		if err := loadIndexFromDatafile(t, datafiles[lastID]); err != nil {
+			return nil, err
+		}
+		return t, nil
+	}
+	sortedDatafiles := getSortedDatafiles(datafiles)
+	for _, df := range sortedDatafiles {
+		if err := loadIndexFromDatafile(t, df); err != nil {
+			return nil, err
 		}
 	}
 	return t, nil
+}
+
+func loadIndexFromDatafile(t art.Tree, df data.Datafile) error {
+	var offset int64
+	for {
+		e, n, err := df.Read()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return err
+		}
+		// Tombstone value  (deleted key)
+		if len(e.Value) == 0 {
+			t.Delete(e.Key)
+			offset += n
+			continue
+		}
+		item := internal.Item{FileID: df.FileID(), Offset: offset, Size: n}
+		t.Insert(e.Key, item)
+		offset += n
+	}
+	return nil
+}
+
+func loadMetadata(path string) (*metadata.MetaData, error) {
+	if !internal.Exists(filepath.Join(path, "meta.json")) {
+		meta := new(metadata.MetaData)
+		return meta, nil
+	}
+	return metadata.Load(filepath.Join(path, "meta.json"))
 }
