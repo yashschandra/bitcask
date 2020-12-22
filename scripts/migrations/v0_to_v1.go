@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 
 	"github.com/prologic/bitcask/internal"
+	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -19,6 +20,12 @@ const (
 	ttlSize                 = 8
 	defaultDatafileFilename = "%09d.data"
 )
+
+var logger = logrus.New()
+
+func init() {
+	logger.SetLevel(logrus.DebugLevel)
+}
 
 func ApplyV0ToV1(dir string, maxDatafileSize int) error {
 	temp, err := prepare(dir)
@@ -127,6 +134,7 @@ func getSingleEntry(f *os.File, offset int64) ([]byte, error) {
 		return nil, err
 	}
 	actualKeySize, actualValueSize := getKeyValueSize(prefixBuf)
+	logger.Debug("key size: ", actualKeySize, ", value size: ", actualValueSize)
 	entryBuf, err := read(f, uint64(actualKeySize)+actualValueSize+checksumSize, offset+keySize+valueSize)
 	if err != nil {
 		return nil, err
