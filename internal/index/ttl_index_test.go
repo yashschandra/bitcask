@@ -1,13 +1,14 @@
 package index
 
 import (
-	art "github.com/plar/go-adaptive-radix-tree"
-	assert2 "github.com/stretchr/testify/assert"
 	"io/ioutil"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	art "github.com/plar/go-adaptive-radix-tree"
+	assert2 "github.com/stretchr/testify/assert"
 )
 
 func Test_TTLIndexer(t *testing.T) {

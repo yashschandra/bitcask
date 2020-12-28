@@ -2,11 +2,12 @@ package index
 
 import (
 	"encoding/binary"
-	art "github.com/plar/go-adaptive-radix-tree"
-	"github.com/prologic/bitcask/internal"
 	"io"
 	"os"
 	"time"
+
+	art "github.com/plar/go-adaptive-radix-tree"
+	"github.com/prologic/bitcask/internal"
 )
 
 type ttlIndexer struct{}
