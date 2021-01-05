@@ -308,16 +308,16 @@ func (b *Bitcask) Keys() chan []byte {
 	return ch
 }
 
-// Purge deletes all expired keys
-func (b *Bitcask) Purge() error {
+// RunGC deletes all expired keys
+func (b *Bitcask) RunGC() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.purge()
+	return b.runGC()
 }
 
-// purge deletes all keys that are expired
+// runGC deletes all keys that are expired
 // caller function should take care of the locking when calling this method
-func (b *Bitcask) purge() (err error) {
+func (b *Bitcask) runGC() (err error) {
 	b.ttlIndex.ForEach(func(node art.Node) (cont bool) {
 		if !b.isExpired(node.Key()) {
 			return true

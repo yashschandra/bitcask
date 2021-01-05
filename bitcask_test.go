@@ -108,11 +108,11 @@ func TestAll(t *testing.T) {
 		assert.False(db.Has([]byte("bar")))
 	})
 
-	t.Run("Purge", func(t *testing.T) {
+	t.Run("RunGC", func(t *testing.T) {
 		err = db.Put([]byte("bar"), []byte("baz"), WithExpiry(time.Now()))
 		assert.NoError(err)
 		time.Sleep(time.Millisecond)
-		err = db.Purge()
+		err = db.RunGC()
 		assert.NoError(err)
 		_, err := db.Get([]byte("bar"))
 		assert.Error(err)
